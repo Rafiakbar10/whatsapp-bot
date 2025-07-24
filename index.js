@@ -4,99 +4,77 @@ const ytdl = require('ytdl-core');
 const fs = require('fs');
 const path = require('path');
 
+// Konfigurasi ringan untuk Puppeteer
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--single-process',  // Menghemat RAM
+      '--disable-dev-shm-usage',
+      '--no-zygote'
+    ]
   }
 });
 
-// QR Code handler
-client.on('qr', qr => {
-  qrcode.generate(qr, { small: true });
-  console.log('Scan QR code di atas dengan WhatsApp Anda!');
-});
+// Sederhanakan handler QR
+client.on('qr', qr => qrcode.generate(qr, { small: true }));
 
-// Bot ready handler
-client.on('ready', () => {
-  console.log('Bot berhasil terhubung!');
-});
+// Handler ready yang minimalis
+client.on('ready', () => console.log('Bot ready ✅'));
 
-// Message handler
+// Optimasi handler pesan
 client.on('message', async msg => {
-  if (msg.body.startsWith('!download')) {
-    const url = msg.body.split(' ')[1];
+  if (!msg.body.startsWith('!download')) return;
 
-    // Validasi URL
-    if (!url) {
-      return msg.reply('❌ Format salah. Gunakan: !download [URL YouTube]');
-    }
-
+  const url = msg.body.split(' ')[1];
+  if (!url) return msg.reply('❌ Gunakan: !download [URL]');
+  
+  try {
     if (!ytdl.validateURL(url)) {
       return msg.reply('❌ URL YouTube tidak valid!');
     }
 
-    try {
-      await msg.reply('⏳ Sedang memproses video...');
+    const videoPath = path.join(__dirname, 'temp_video.mp4');
+    const videoStream = ytdl(url, { 
+      quality: 'lowest',  // Gunakan kualitas lebih rendah untuk menghemat bandwidth
+      filter: format => format.container === 'mp4'
+    });
 
-      const videoPath = path.join(__dirname, 'temp_video.mp4');
-      const videoStream = ytdl(url, { 
-        quality: 'highestvideo',
-        filter: format => format.container === 'mp4'
-      });
-      
-      const writeStream = fs.createWriteStream(videoPath);
-      videoStream.pipe(writeStream);
+    // Progress handler yang lebih efisien
+    let lastProgress = 0;
+    videoStream.on('progress', (_, downloaded, total) => {
+      const percent = Math.floor(downloaded / total * 100);
+      if (percent >= lastProgress + 25) {  // Laporkan setiap 25% progress
+        msg.reply(`📥 ${percent}% downloaded`);
+        lastProgress = percent;
+      }
+    });
 
-      // Progress handler
-      let progressMessageSent = false;
-      videoStream.on('progress', (chunkLength, downloaded, total) => {
-        const percent = (downloaded / total * 100).toFixed(2);
-        if (!progressMessageSent && percent > 50) {
-          msg.reply(`📥 ${percent}% terdownload...`);
-          progressMessageSent = true;
-        }
-      });
+    // Stream langsung ke WhatsApp tanpa simpan file
+    const chunks = [];
+    videoStream.on('data', chunk => chunks.push(chunk));
+    videoStream.on('end', async () => {
+      try {
+        await client.sendMessage(msg.from, {
+          media: Buffer.concat(chunks),
+          caption: '🎬 Video siap!'
+        });
+      } catch (error) {
+        console.error('Send error:', error);
+        msg.reply('❌ Gagal mengirim video');
+      }
+    });
 
-      // Ketika download selesai
-      writeStream.on('finish', async () => {
-        try {
-          await msg.reply('✅ Download selesai! Mengirim video...');
-          
-          await client.sendMessage(msg.from, {
-            media: fs.readFileSync(videoPath),
-            caption: 'Video YouTube - Downloaded via Bot'
-          });
-
-          // Hapus file temporary
-          fs.unlinkSync(videoPath);
-        } catch (sendError) {
-          console.error('Gagal mengirim video:', sendError);
-          msg.reply('❌ Gagal mengirim video. Coba lagi nanti.');
-        }
-      });
-
-      // Error handler
-      writeStream.on('error', (error) => {
-        console.error('Error saat download:', error);
-        msg.reply('❌ Gagal mendownload video. Pastikan URL benar dan coba lagi.');
-        if (fs.existsSync(videoPath)) {
-          fs.unlinkSync(videoPath);
-        }
-      });
-
-    } catch (error) {
-      console.error('Error:', error);
-      msg.reply('❌ Terjadi kesalahan. Coba lagi nanti.');
-    }
+  } catch (error) {
+    console.error('Error:', error);
+    msg.reply('❌ Terjadi kesalahan sistem');
   }
 });
 
-// Start bot
 client.initialize();
 
-// Handler untuk error tidak terduga
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
+// Error handling global
+process.on('unhandledRejection', err => console.error('Unhandled rejection:', err));
